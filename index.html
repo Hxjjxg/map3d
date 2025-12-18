@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>全景图查看器</title>
+  <style>
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #0b0c10;
+      font-family: "Segoe UI", system-ui, sans-serif;
+    }
+    #canvas-container {
+      position: fixed;
+      inset: 0;
+      cursor: grab;
+    }
+    #canvas-container.dragging {
+      cursor: grabbing;
+    }
+    .hint {
+      position: fixed;
+      left: 50%;
+      bottom: 16px;
+      transform: translateX(-50%);
+      background: rgba(0, 0, 0, 0.55);
+      color: #e0e6ed;
+      padding: 10px 16px;
+      border-radius: 12px;
+      font-size: 14px;
+      letter-spacing: 0.2px;
+      backdrop-filter: blur(6px);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+      user-select: none;
+      pointer-events: none;
+    }
+    .tooltip {
+      position: fixed;
+      padding: 6px 12px;
+      background: rgba(17, 25, 40, 0.78);
+      color: #f5f7fa;
+      border-radius: 8px;
+      font-size: 13px;
+      pointer-events: none;
+      transform: translate(-50%, calc(-100% - 14px));
+      white-space: nowrap;
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+      transition: opacity 0.18s ease;
+      opacity: 0;
+      z-index: 10;
+    }
+    .tooltip.show {
+      opacity: 1;
+    }
+    .direction-display {
+      position: fixed;
+      top: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0, 0, 0, 0.75);
+      color: #ffffff;
+      padding: 12px 24px;
+      border-radius: 8px;
+      font-size: 18px;
+      font-weight: bold;
+      font-family: monospace;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+      z-index: 1000;
+    }
+  </style>
+</head>
+<body>
+  <div id="canvas-container"></div>
+  <div class="direction-display" id="directionDisplay">方向: --°</div>
+  <div class="hint">拖拽旋转视角,滚轮缩放。通过 URL 参数 ?map=名称 加载不同地图。</div>
+  <div id="marker-tooltip" class="tooltip"></div>
+  <script src="./three.min.js"></script>
+  <script>
+    const container = document.getElementById('canvas-container');
+    const tooltip = document.getElementById('marker-tooltip');
+    const directionDisplay = document.getElementById('directionDisplay');
+
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+    const markerGroup = new THREE.Group();
+    const baseMarkerColor = 0xffc857;
+    const hoverMarkerColor = 0xffffff;
+    const markerGeometry = new THREE.SphereGeometry(4, 16, 16);
+
+    let hoveredMarker = null;
+    let panoramaSize = null;
+    let csvPoints = [];
+    let northDirectionPixel = 0;
+    let rawNorthPixel = null;
+    
+    const urlParams = new URLSearchParams(window.location.search);
+    const mapName = urlParams.get('map') || 'spot1';
+    const mapFile = `${mapName}.webp`;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    container.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000000);
+    scene.add(markerGroup);
+
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 1, 1100);
+    camera.target = new THREE.Vector3(0, 0, 0);
+
+    // 创建朝内的球体网格
+    const geometry = new THREE.SphereGeometry(500, 60, 40);
+    geometry.scale(-1, 1, 1); // 反转法线以便从内部观察
+
+    const loader = new THREE.TextureLoader();
+    const texture = loader.load(mapFile, (tex) => {
+      if (tex.image) {
+        panoramaSize = { width: tex.image.width, height: tex.image.height };
+        console.log(`已加载地图: ${mapFile}, 尺寸:`, panoramaSize);
+        
+        if (rawNorthPixel !== null) {
+          northDirectionPixel = panoramaSize.width - rawNorthPixel;
+          console.log(`计算正北方向像素: ${northDirectionPixel} (原始: ${rawNorthPixel})`);
+        }
+        
+        if (csvPoints.length) {
+          buildMarkers();
+        }
+      }
+    }, undefined, (error) => {
+      console.error(`无法加载地图 ${mapFile}:`, error);
+      alert(`无法加载地图文件: ${mapFile}`);
+    });
+    texture.colorSpace = THREE.SRGBColorSpace;
+
+    const material = new THREE.MeshBasicMaterial({ map: texture });
+    const mesh = new THREE.Mesh(geometry, material);
+    scene.add(mesh);
+
+    let isUserInteracting = false;
+    let onPointerDownMouseX = 0;
+    let onPointerDownMouseY = 0;
+    let lon = 0;
+    let lat = 0;
+    let phi = 0;
+    let theta = 0;
+    let onPointerDownLon = 0;
+    let onPointerDownLat = 0;
+
+    loadCsvData();
+
+    function onPointerDown(event) {
+      isUserInteracting = true;
+      container.classList.add('dragging');
+      const { clientX, clientY } = getEventClientPosition(event);
+      onPointerDownMouseX = clientX;
+      onPointerDownMouseY = clientY;
+      onPointerDownLon = lon;
+      onPointerDownLat = lat;
+      updateMouse(clientX, clientY);
+      updateHover();
+    }
+
+    function onPointerMove(event) {
+      const { clientX, clientY } = getEventClientPosition(event);
+      updateMouse(clientX, clientY);
+      if (isUserInteracting) {
+        lon = (onPointerDownMouseX - clientX) * 0.1 + onPointerDownLon;
+        lat = (clientY - onPointerDownMouseY) * 0.1 + onPointerDownLat;
+      }
+      updateHover();
+    }
+
+    function onPointerUp() {
+      isUserInteracting = false;
+      container.classList.remove('dragging');
+    }
+
+    function onWheel(event) {
+      event.preventDefault();
+      camera.fov = THREE.MathUtils.clamp(camera.fov + event.deltaY * 0.05, 30, 100);
+      camera.updateProjectionMatrix();
+    }
+
+    container.addEventListener('mousedown', onPointerDown, false);
+    container.addEventListener('mousemove', onPointerMove, false);
+    container.addEventListener('mouseup', onPointerUp, false);
+    container.addEventListener('mouseleave', () => {
+      onPointerUp();
+      setHoveredMarker(null);
+    }, false);
+
+    container.addEventListener('touchstart', onPointerDown, { passive: true });
+    container.addEventListener('touchmove', onPointerMove, { passive: true });
+    container.addEventListener('touchend', () => {
+      onPointerUp();
+      setHoveredMarker(null);
+    }, { passive: true });
+
+    container.addEventListener('wheel', onWheel, { passive: false });
+
+    function onWindowResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+    window.addEventListener('resize', onWindowResize, false);
+
+    function animate() {
+      requestAnimationFrame(animate);
+      update();
+      renderer.render(scene, camera);
+      postRenderUpdates();
+    }
+
+    function updateDirectionDisplay() {
+      if (!panoramaSize || !northDirectionPixel) return;
+      
+      const northAngle = (northDirectionPixel / panoramaSize.width) * 360;
+      let currentDirection = (lon + northAngle) % 360;
+      
+      if (currentDirection < 0) currentDirection += 360;
+      
+      directionDisplay.textContent = `方向: ${Math.round(currentDirection)}°`;
+    }
+
+    function update() {
+      lat = Math.max(-85, Math.min(85, lat));
+      phi = THREE.MathUtils.degToRad(90 - lat);
+      theta = THREE.MathUtils.degToRad(lon);
+
+      camera.target.x = 500 * Math.sin(phi) * Math.cos(theta);
+      camera.target.y = 500 * Math.cos(phi);
+      camera.target.z = 500 * Math.sin(phi) * Math.sin(theta);
+      camera.lookAt(camera.target);
+      
+      updateDirectionDisplay();
+    }
+
+    function getEventClientPosition(event) {
+      if (event.touches?.length) {
+        const touch = event.touches[0];
+        return { clientX: touch.clientX, clientY: touch.clientY };
+      }
+      return { clientX: event.clientX ?? 0, clientY: event.clientY ?? 0 };
+    }
+
+    function updateMouse(clientX, clientY) {
+      const rect = renderer.domElement.getBoundingClientRect();
+      mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+      mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+    }
+
+
+    async function loadCsvData() {
+      try {
+        const csvFile = `${mapName}_trees_loc.csv`;
+        const response = await fetch(csvFile);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const text = await response.text();
+        const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+        
+        csvPoints = [];
+        
+        for (const line of lines) {
+          const parts = line.split(',').map((part) => part.trim());
+          if (parts.length < 2) continue;
+          
+          const x = Number(parts[0]);
+          const y = Number(parts[1]);
+          
+          if (x === -1 && y === -1 && parts.length >= 3) {
+            rawNorthPixel = Number(parts[2]);
+            console.log(`检测到正北方向原始像素: ${rawNorthPixel}`);
+            
+            if (panoramaSize) {
+              northDirectionPixel = panoramaSize.width - rawNorthPixel;
+              console.log(`计算正北方向像素: ${northDirectionPixel}`);
+            }
+            continue;
+          }
+          
+          const label = parts[2] || '未知';
+          
+          if (Number.isFinite(x) && Number.isFinite(y) && label) {
+            csvPoints.push({ x, y, label });
+          }
+        }
+
+        console.log(`已从 ${csvFile} 加载 ${csvPoints.length} 个标记点`);
+        if (panoramaSize) {
+          buildMarkers();
+        }
+      } catch (error) {
+        console.error(`无法读取 ${mapName}_trees_loc.csv:`, error);
+      }
+    }
+
+    function buildMarkers() {
+      markerGroup.clear();
+      csvPoints.forEach(({ x, y, label }) => {
+        // 修改说明：
+        // 原代码: const lonDeg = (x / panoramaSize.width) * 360 - 180;
+        // 现代码: 将角度取反 (加一个负号)，即可实现关于中心(0度)的左右镜像翻转。
+        const lonDeg = ((x/ panoramaSize.width) * 360); 
+        
+        const latDeg = 90 - (y / panoramaSize.height) * 180;
+        const position = latLonToVector3(latDeg, lonDeg, 490);
+        const markerMaterial = new THREE.MeshBasicMaterial({
+          color: baseMarkerColor,
+          transparent: true,
+          opacity: 0.9,
+        });
+        const marker = new THREE.Mesh(markerGeometry, markerMaterial);
+        marker.position.copy(position);
+        marker.userData = { label };
+        markerGroup.add(marker);
+      });
+      updateHover();
+    }
+
+    function latLonToVector3(latDeg, lonDeg, radius) {
+      const phiRad = THREE.MathUtils.degToRad(90 - latDeg);
+      const thetaRad = THREE.MathUtils.degToRad(lonDeg);
+      const vector = new THREE.Vector3();
+      vector.x = radius * Math.sin(phiRad) * Math.cos(thetaRad);
+      vector.y = radius * Math.cos(phiRad);
+      vector.z = radius * Math.sin(phiRad) * Math.sin(thetaRad);
+      return vector;
+    }
+
+    function updateHover() {
+      if (!markerGroup.children.length) {
+        setHoveredMarker(null);
+        return;
+      }
+      raycaster.setFromCamera(mouse, camera);
+      const intersects = raycaster.intersectObjects(markerGroup.children, false);
+      setHoveredMarker(intersects.length ? intersects[0].object : null);
+    }
+
+    function setHoveredMarker(marker) {
+      if (hoveredMarker === marker) {
+        if (hoveredMarker) updateTooltipPosition(hoveredMarker);
+        return;
+      }
+      if (hoveredMarker) {
+        hoveredMarker.scale.setScalar(1);
+        hoveredMarker.material.color.set(baseMarkerColor);
+      }
+      hoveredMarker = marker;
+      if (hoveredMarker) {
+        hoveredMarker.scale.setScalar(1.6);
+        hoveredMarker.material.color.set(hoverMarkerColor);
+        tooltip.textContent = hoveredMarker.userData.label;
+        tooltip.classList.add('show');
+        updateTooltipPosition(hoveredMarker);
+      } else {
+        tooltip.classList.remove('show');
+      }
+    }
+
+    function updateTooltipPosition(marker) {
+      const screenPosition = marker.position.clone().project(camera);
+      if (screenPosition.z > 1) {
+        tooltip.classList.remove('show');
+        return;
+      }
+      const rect = renderer.domElement.getBoundingClientRect();
+      const x = (screenPosition.x * 0.5 + 0.5) * rect.width + rect.left;
+      const y = (-screenPosition.y * 0.5 + 0.5) * rect.height + rect.top;
+      tooltip.style.left = `${x}px`;
+      tooltip.style.top = `${y}px`;
+    }
+
+    function postRenderUpdates() {
+      if (hoveredMarker && tooltip.classList.contains('show')) {
+        updateTooltipPosition(hoveredMarker);
+      }
+    }
+
+    animate();
+  </script>
+</body>
+</html>

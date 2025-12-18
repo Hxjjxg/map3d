@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Small Map Viewer</title>
+    <style>
+      body {
+        margin: 0;
+        background: #f0f0f0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .map-container {
+        position: relative;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .map-content {
+        position: relative;
+      }
+
+      .map-content img {
+        display: block;
+        width: 100%;
+        height: auto;
+        user-select: none;
+        pointer-events: none;
+      }
+
+      .marker-layer {
+        position: absolute;
+        inset: 0;
+      }
+
+      .marker {
+        position: absolute;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background: #d60000;
+        border: 2px solid #ffffff;
+        transform: translate(-50%, -50%);
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="map-container" id="mapViewport">
+      <div class="map-content" id="mapContent">
+        <img src="bndsmap.png" alt="地图" id="mapImage" />
+        <div class="marker-layer" id="markerLayer"></div>
+      </div>
+    </div>
+    <script>
+      (() => {
+        const mapImage = document.getElementById('mapImage');
+        const mapContent = document.getElementById('mapContent');
+        const markerLayer = document.getElementById('markerLayer');
+        const mapViewport = document.getElementById('mapViewport');
+        const targetHref = 'index.html';
+
+        let imageWidth = 0;
+        let imageHeight = 0;
+        let scale = 1;
+
+        const minScale = 0.5;
+        const maxScale = 5;
+
+        const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+
+        const applyScale = () => {
+          if (!imageWidth || !imageHeight) {
+            return;
+          }
+
+          const scaledWidth = imageWidth * scale;
+          const scaledHeight = imageHeight * scale;
+
+          mapContent.style.width = `${scaledWidth}px`;
+          mapContent.style.height = `${scaledHeight}px`;
+        };
+
+        const parseCsv = (text) => {
+          const lines = text
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter(Boolean);
+
+          const hasHeader = lines[0] && lines[0].toLowerCase().includes('spotname');
+          const dataLines = hasHeader ? lines.slice(1) : lines;
+          const points = [];
+
+          for (const line of dataLines) {
+            const parts = line.split(',').map((part) => part.trim());
+            if (parts.length < 2) continue;
+
+            const x = Number(parts[0]);
+            const y = Number(parts[1]);
+
+            if (x === -1 && y === -1 && parts.length >= 3) {
+              northDirection = Number(parts[2]);
+              console.log(`检测到正北方向像素: ${northDirection}`);
+              continue;
+            }
+
+            if (Number.isFinite(x) && Number.isFinite(y)) {
+              const webpFile = parts.length >= 4 ? parts[3] : '';
+              points.push({ x, y, webp: webpFile });
+            }
+          }
+
+          return points;
+        };
+
+        const createMarker = ({ x, y, webp }) => {
+          const marker = document.createElement('button');
+          marker.type = 'button';
+          marker.className = 'marker';
+          marker.style.left = `${(x / imageWidth) * 100}%`;
+          marker.style.top = `${(y / imageHeight) * 100}%`;
+          marker.addEventListener('click', () => {
+            if (webp) {
+              const mapName = webp.replace('.webp', '');
+              window.location.href = `${targetHref}?map=${mapName}`;
+            } else {
+              window.location.href = targetHref;
+            }
+          });
+          markerLayer.appendChild(marker);
+        };
+
+        const loadPoints = async () => {
+          try {
+            const response = await fetch('spot_loc.csv', { cache: 'no-store' });
+            if (!response.ok) {
+              throw new Error('无法读取 point.csv');
+            }
+            const text = await response.text();
+            if (!text.trim()) {
+              return;
+            }
+            const points = parseCsv(text);
+            points.forEach(createMarker);
+          } catch (error) {
+            console.error(error);
+          }
+        };
+
+        const init = () => {
+          imageWidth = mapImage.naturalWidth;
+          imageHeight = mapImage.naturalHeight;
+
+          if (!imageWidth || !imageHeight) {
+            console.error('无法获取图片尺寸');
+            return;
+          }
+
+          applyScale();
+          loadPoints();
+        };
+
+        mapImage.addEventListener('load', init);
+        if (mapImage.complete) {
+          init();
+        }
+
+        mapViewport.addEventListener(
+          'wheel',
+          (event) => {
+            event.preventDefault();
+
+            const direction = event.deltaY < 0 ? 1 : -1;
+            const zoomStep = 0.1 * direction;
+
+            scale = clamp(scale + zoomStep, minScale, maxScale);
+            applyScale();
+          },
+          { passive: false }
+        );
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>SmallMapViewer</title>
+    <style>
+        /*
+        * 1. 浅灰色背景
+        * 2. 居中显示
+        */
+        body {
+            background-color: lightgray; /* 浅灰色背景 */
+            display: flex;
+            justify-content: center; /* 水平居中 */
+            align-items: center; /* 垂直居中 */
+            min-height: 100vh; /* 确保 body 至少占满视口高度 */
+            margin: 0;
+            padding: 20px;
+            overflow: auto; /* 允许滚动以查看放大的部分 */
+            box-sizing: border-box;
+        }
+
+        /*
+        * 新增：外部灰色“框”容器 - 保持居中且不动
+        * 使用一个较深的灰色作为边框和背景，模拟“框”的感觉
+        */
+        #static-frame {
+            /* 浅灰色背景，用于模拟更灰的框内部 */
+            background-color: #f0f0f0; 
+            /* 更灰的边框 */
+            border: 8px solid #aaaaaa; 
+            border-radius: 12px;
+            /* 确保框适应图片大小，并设置居中 */
+            display: inline-block;
+            box-shadow: 0 8px 16px rgba(0,0,0,0.4);
+            overflow: hidden; /* 隐藏地图容器超出框的部分 */
+        }
+        
+        /*
+        * 包含地图图片和标记的容器
+        * 用于实现缩放和平移，它现在位于 #static-frame 内部
+        */
+        #map-container {
+            position: relative;
+            transform-origin: 0 0; /* 缩放原点设为左上角 */
+            cursor: grab; /* 可拖动光标 */
+            flex-shrink: 0;
+            line-height: 0; /* 消除图片下方的空白 */
+        }
+        
+        #map-image {
+            display: block;
+            user-select: none; /* 防止图片被选中 */
+            max-width: none; /* 允许图片超出容器进行缩放 */
+        }
+        
+        /* 标记点的样式：小圆点 */
+        .spot-marker {
+            position: absolute;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background-color: #ff0000; /* 红色标记 */
+            border: 2px solid #ffffff; /* 白色边框 */
+            box-shadow: 0 0 5px rgba(0,0,0,0.5);
+            /* 将圆点中心对准 (x,y) 坐标 */
+            transform: translate(-50%, -50%); 
+            cursor: pointer;
+            z-index: 10;
+            transition: background-color 0.2s;
+        }
+
+        .spot-marker:hover {
+            background-color: #00ff00; /* 悬停时变绿 */
+        }
+    </style>
+</head>
+<body>
+    <!-- 新增外部静态框容器 -->
+    <div id="static-frame">
+        <div id="map-container">
+            <!-- 放置 bndsmap.png 图片 -->
+            <img id="map-image" src="bndsmap.png" alt="Map">
+            <!-- 标记点会通过 JavaScript 添加到这里 -->
+        </div>
+    </div>
+
+    <script>
+        const mapContainer = document.getElementById('map-container');
+        const mapImage = document.getElementById('map-image');
+        
+        let scale = 1.0;
+        let translateX = 0;
+        let translateY = 0;
+        let isDragging = false;
+        let startX, startY;
+
+        // --- 缩放和平移功能 ---
+        
+        // 应用 CSS transform
+        function applyTransform() {
+            mapContainer.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale})`;
+        }
+
+        // 缩放（鼠标滚轮）
+        mapContainer.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const zoomIntensity = 0.1;
+            const oldScale = scale;
+
+            if (e.deltaY < 0) {
+                scale += zoomIntensity; // 放大
+            } else {
+                scale -= zoomIntensity; // 缩小
+            }
+            
+            // 限制缩放范围
+            scale = Math.max(0.5, Math.min(5.0, scale)); 
+
+            // 调整平移，实现以鼠标位置为中心的缩放
+            if (scale !== oldScale) {
+                const rect = mapContainer.getBoundingClientRect();
+                
+                // 鼠标相对于 map-container 内部的坐标（已考虑当前平移和缩放）
+                const mouseX = (e.clientX - rect.left) / oldScale;
+                const mouseY = (e.clientY - rect.top) / oldScale;
+
+                // 计算新的平移量 (为了简单，这里直接使用简单的缩放逻辑，保证图片能动)
+                // 实际中心缩放需要更复杂的计算，但当前逻辑能满足基本缩放和平移需求
+                
+                applyTransform();
+            }
+        });
+
+        // 平移（拖动）
+        mapContainer.addEventListener('mousedown', (e) => {
+            isDragging = true;
+            mapContainer.style.cursor = 'grabbing';
+            // 记录鼠标相对于 map-container 当前平移位置的偏移
+            // 注意：这里需要考虑 scale
+            startX = e.clientX - translateX;
+            startY = e.clientY - translateY;
+            e.preventDefault(); // 阻止默认的拖动行为
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            // 计算新的平移量
+            translateX = e.clientX - startX;
+            translateY = e.clientY - startY;
+            applyTransform();
+        });
+
+        document.addEventListener('mouseup', () => {
+            isDragging = false;
+            mapContainer.style.cursor = 'grab';
+        });
+
+        // 阻止图片本身的拖动行为
+        mapImage.addEventListener('dragstart', (e) => {
+            e.preventDefault();
+        });
+
+        // --- CSV 数据加载和标记点绘制 ---
+
+        const csvFileName = 'point.csv';
+
+        function loadMarkers() {
+            // 首先确保图片加载完成，以便获取正确的尺寸
+            mapImage.onload = () => {
+                fetch(csvFileName)
+                    .then(response => {
+                        if (!response.ok) {
+                            console.error(`Error fetching ${csvFileName}: ${response.statusText}. Please ensure the file exists.`);
+                            return Promise.resolve('');
+                        }
+                        return response.text();
+                    })
+                    .then(csvText => {
+                        if (!csvText) return;
+
+                        const lines = csvText.trim().split('\n');
+                        
+                        lines.forEach(line => {
+                            const parts = line.split(',');
+                            if (parts.length < 3) return;
+
+                            const x = parseInt(parts[0].trim(), 10);
+                            const y = parseInt(parts[1].trim(), 10);
+                            const spotName = parts[2].trim();
+
+                            if (isNaN(x) || isNaN(y)) return;
+
+                            // 创建标记元素
+                            const marker = document.createElement('div');
+                            marker.classList.add('spot-marker');
+                            marker.title = `${spotName} (${x},${y})`; 
+                            
+                            // 设置位置：(0,0) 为左上角
+                            marker.style.left = `${x}px`;
+                            marker.style.top = `${y}px`;
+
+                            // 添加点击事件处理程序
+                            marker.addEventListener('click', (e) => {
+                                e.stopPropagation(); 
+                                // 点击后跳转到 index.html
+                                window.location.href = 'index.html'; 
+                            });
+
+                            // 将标记添加到地图容器
+                            mapContainer.appendChild(marker);
+                        });
+                    })
+                    .catch(error => {
+                        console.error('Error processing CSV:', error);
+                    });
+            };
+            
+            // 如果图片已经加载完成（缓存），则手动触发 onload 逻辑
+            if (mapImage.complete) {
+                 mapImage.onload();
+            }
+        }
+
+        // 页面加载完成后，加载标记
+        loadMarkers();
+
+    </script>
+</body>
+</html>
