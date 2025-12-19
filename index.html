@@ -1,11 +1,13 @@
 <!doctype html>
 <html lang="zh-CN">
+
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>全景图查看器</title>
   <style>
-    html, body {
+    html,
+    body {
       width: 100%;
       height: 100%;
       margin: 0;
@@ -13,14 +15,17 @@
       background: #0b0c10;
       font-family: "Segoe UI", system-ui, sans-serif;
     }
+
     #canvas-container {
       position: fixed;
       inset: 0;
       cursor: grab;
     }
+
     #canvas-container.dragging {
       cursor: grabbing;
     }
+
     .hint {
       position: fixed;
       left: 50%;
@@ -38,6 +43,7 @@
       user-select: none;
       pointer-events: none;
     }
+
     .tooltip {
       position: fixed;
       padding: 6px 12px;
@@ -54,9 +60,11 @@
       opacity: 0;
       z-index: 10;
     }
+
     .tooltip.show {
       opacity: 1;
     }
+
     .direction-display {
       position: fixed;
       top: 20px;
@@ -74,6 +82,7 @@
     }
   </style>
 </head>
+
 <body>
   <div id="canvas-container"></div>
   <div class="direction-display" id="directionDisplay">方向: --°</div>
@@ -88,6 +97,7 @@
     const raycaster = new THREE.Raycaster();
     const mouse = new THREE.Vector2();
     const markerGroup = new THREE.Group();
+    const arrowGroup = new THREE.Group();
     const baseMarkerColor = 0xffc857;
     const hoverMarkerColor = 0xffffff;
     const markerGeometry = new THREE.SphereGeometry(4, 16, 16);
@@ -97,10 +107,19 @@
     let csvPoints = [];
     let northDirectionPixel = 0;
     let rawNorthPixel = null;
-    
+    let allSpots = [];
+    let currentSpot = null;
+    let hoveredArrow = null;
+
     const urlParams = new URLSearchParams(window.location.search);
     const mapName = urlParams.get('map') || 'spot1';
-    const mapFile = `${mapName}.webp`;
+    let mapFile;
+    if (mapName == "spot3"||mapName == "spot4"||mapName == "spot5"||mapName == "spot6") {
+      mapFile = `${mapName}.jpg`;
+    }
+    else {
+      mapFile = `${mapName}.webp`;
+    }
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(window.devicePixelRatio);
@@ -110,6 +129,7 @@
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x000000);
     scene.add(markerGroup);
+    scene.add(arrowGroup);
 
     const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 1, 1100);
     camera.target = new THREE.Vector3(0, 0, 0);
@@ -123,14 +143,18 @@
       if (tex.image) {
         panoramaSize = { width: tex.image.width, height: tex.image.height };
         console.log(`已加载地图: ${mapFile}, 尺寸:`, panoramaSize);
-        
+//important
         if (rawNorthPixel !== null) {
           northDirectionPixel = panoramaSize.width - rawNorthPixel;
           console.log(`计算正北方向像素: ${northDirectionPixel} (原始: ${rawNorthPixel})`);
         }
-        
+//important
         if (csvPoints.length) {
           buildMarkers();
+        }
+
+        if (currentSpot) {
+          createNavigationArrows();
         }
       }
     }, undefined, (error) => {
@@ -154,6 +178,7 @@
     let onPointerDownLat = 0;
 
     loadCsvData();
+    loadSpotLocations();
 
     function onPointerDown(event) {
       isUserInteracting = true;
@@ -191,6 +216,12 @@
     container.addEventListener('mousedown', onPointerDown, false);
     container.addEventListener('mousemove', onPointerMove, false);
     container.addEventListener('mouseup', onPointerUp, false);
+    container.addEventListener('click', (event) => {
+      if (hoveredArrow && hoveredArrow.parent && hoveredArrow.parent.userData.targetSpot) {
+        const targetSpot = hoveredArrow.parent.userData.targetSpot;
+        window.location.href = `index.html?map=${targetSpot}`;
+      }
+    }, false);
     container.addEventListener('mouseleave', () => {
       onPointerUp();
       setHoveredMarker(null);
@@ -221,12 +252,12 @@
 
     function updateDirectionDisplay() {
       if (!panoramaSize || !northDirectionPixel) return;
-      
+
       const northAngle = (northDirectionPixel / panoramaSize.width) * 360;
       let currentDirection = (lon + northAngle) % 360;
-      
+
       if (currentDirection < 0) currentDirection += 360;
-      
+
       directionDisplay.textContent = `方向: ${Math.round(currentDirection)}°`;
     }
 
@@ -239,7 +270,7 @@
       camera.target.y = 500 * Math.cos(phi);
       camera.target.z = 500 * Math.sin(phi) * Math.sin(theta);
       camera.lookAt(camera.target);
-      
+
       updateDirectionDisplay();
     }
 
@@ -265,29 +296,29 @@
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const text = await response.text();
         const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-        
+
         csvPoints = [];
-        
+
         for (const line of lines) {
           const parts = line.split(',').map((part) => part.trim());
           if (parts.length < 2) continue;
-          
+
           const x = Number(parts[0]);
           const y = Number(parts[1]);
-          
+
           if (x === -1 && y === -1 && parts.length >= 3) {
             rawNorthPixel = Number(parts[2]);
             console.log(`检测到正北方向原始像素: ${rawNorthPixel}`);
-            
+
             if (panoramaSize) {
               northDirectionPixel = panoramaSize.width - rawNorthPixel;
               console.log(`计算正北方向像素: ${northDirectionPixel}`);
             }
             continue;
           }
-          
+
           const label = parts[2] || '未知';
-          
+
           if (Number.isFinite(x) && Number.isFinite(y) && label) {
             csvPoints.push({ x, y, label });
           }
@@ -308,8 +339,8 @@
         // 修改说明：
         // 原代码: const lonDeg = (x / panoramaSize.width) * 360 - 180;
         // 现代码: 将角度取反 (加一个负号)，即可实现关于中心(0度)的左右镜像翻转。
-        const lonDeg = ((x/ panoramaSize.width) * 360); 
-        
+        const lonDeg = ((x / panoramaSize.width) * 360);
+
         const latDeg = 90 - (y / panoramaSize.height) * 180;
         const position = latLonToVector3(latDeg, lonDeg, 490);
         const markerMaterial = new THREE.MeshBasicMaterial({
@@ -336,13 +367,13 @@
     }
 
     function updateHover() {
-      if (!markerGroup.children.length) {
-        setHoveredMarker(null);
-        return;
-      }
       raycaster.setFromCamera(mouse, camera);
-      const intersects = raycaster.intersectObjects(markerGroup.children, false);
-      setHoveredMarker(intersects.length ? intersects[0].object : null);
+
+      const markerIntersects = raycaster.intersectObjects(markerGroup.children, false);
+      setHoveredMarker(markerIntersects.length ? markerIntersects[0].object : null);
+
+      const arrowIntersects = raycaster.intersectObjects(arrowGroup.children, true);
+      setHoveredArrow(arrowIntersects.length ? arrowIntersects[0].object : null);
     }
 
     function setHoveredMarker(marker) {
@@ -366,6 +397,31 @@
       }
     }
 
+    function setHoveredArrow(arrow) {
+      if (hoveredArrow === arrow) return;
+
+      if (hoveredArrow && hoveredArrow.parent) {
+        hoveredArrow.parent.children.forEach(child => {
+          if (child.material) {
+            child.material.opacity = 0.7;
+          }
+        });
+      }
+
+      hoveredArrow = arrow;
+
+      if (hoveredArrow && hoveredArrow.parent) {
+        hoveredArrow.parent.children.forEach(child => {
+          if (child.material) {
+            child.material.opacity = 1.0;
+          }
+        });
+        container.style.cursor = 'pointer';
+      } else {
+        container.style.cursor = 'grab';
+      }
+    }
+
     function updateTooltipPosition(marker) {
       const screenPosition = marker.position.clone().project(camera);
       if (screenPosition.z > 1) {
@@ -385,7 +441,106 @@
       }
     }
 
+    async function loadSpotLocations() {
+      try {
+        const response = await fetch('spot_loc.csv');
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const text = await response.text();
+        const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+
+        const hasHeader = lines[0] && lines[0].toLowerCase().includes('spotname');
+        const dataLines = hasHeader ? lines.slice(1) : lines;
+
+        allSpots = dataLines.map((line) => {
+          const parts = line.split(',').map((part) => part.trim());
+          if (parts.length < 4) return null;
+
+          return {
+            x: Number(parts[0]),
+            y: Number(parts[1]),
+            name: parts[2],
+            webp: parts[3].replace('.webp', '')
+          };
+        }).filter(spot => spot && Number.isFinite(spot.x) && Number.isFinite(spot.y));
+
+        currentSpot = allSpots.find(spot => spot.webp === mapName);
+
+        if (currentSpot) {
+          console.log(`当前地点: ${currentSpot.name} (${currentSpot.x}, ${currentSpot.y})`);
+          createNavigationArrows();
+        }
+      } catch (error) {
+        console.error('无法读取 spot_loc.csv:', error);
+      }
+    }
+
+    function createNavigationArrows() {
+      if (!currentSpot || !panoramaSize) return;
+
+      arrowGroup.clear();
+
+      const nearbySpots = allSpots.filter(spot => {
+        if (spot.webp === currentSpot.webp) return false;
+
+        const dx = spot.x - currentSpot.x;
+        const dy = spot.y - currentSpot.y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+
+        return distance <= 1000;
+      });
+
+      console.log(`找到 ${nearbySpots.length} 个附近地点`);
+
+      nearbySpots.forEach(spot => {
+        const dx = spot.x - currentSpot.x;
+        const dy = spot.y - currentSpot.y;
+
+        // 使用 atan2(dx, dy) 来实现：0° = 北 (dy>0)，角度顺时针增加
+        // Math.atan2(y,x) 通常以 x 为参考，这里我们使用 (dx, dy) 以把北设为 0°
+        let angleRad = Math.atan2(dx, dy); // 注意参数顺序：x=dx, y=dy
+        //console.log(angleRad);
+        let angleDeg = angleRad * (180 / Math.PI);
+        console.log(angleDeg);
+        // 归一化到 [0,360)
+        //angleDeg = (angleDeg % 360 + 360) % 360;
+
+        const northAngle = (northDirectionPixel / panoramaSize.width) * 360;
+        let targetLonDeg = 180-northAngle - angleDeg;
+        console.log(targetLonDeg);
+        if (targetLonDeg < 0) targetLonDeg += 360;
+        if (targetLonDeg >= 360) targetLonDeg -= 360;
+        console.log(targetLonDeg);
+        const latDeg = -10;
+
+        const position = latLonToVector3(latDeg, targetLonDeg, 150);
+
+        const targetPos = latLonToVector3(latDeg, targetLonDeg, 180);
+        const arrowDir = new THREE.Vector3()
+          .subVectors(targetPos, position)
+          .normalize();
+
+        const arrowLength = 30;
+        const arrowColor = 0x00ff00;
+
+        const arrowHelper = new THREE.ArrowHelper(arrowDir, position, arrowLength, arrowColor, 10, 8);
+        arrowHelper.userData.targetSpot = spot.webp;
+        arrowHelper.userData.spotName = spot.name;
+
+        arrowHelper.children.forEach(child => {
+          if (child.material) {
+            child.material.transparent = true;
+            child.material.opacity = 0.7;
+          }
+        });
+
+        console.log(`箭头指向 ${spot.name}: dx=${dx}, dy=${dy}, 相对角度=${angleDeg.toFixed(1)}°, 正北角度=${northAngle.toFixed(1)}°, 最终经度=${targetLonDeg.toFixed(1)}°`);
+
+        arrowGroup.add(arrowHelper);
+      });
+    }
+
     animate();
   </script>
 </body>
+
 </html>
